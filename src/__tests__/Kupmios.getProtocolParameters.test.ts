@@ -7,8 +7,8 @@ config();
 test("Kupmios.getProtocolParameters", async () => {
 
     const kupmios = new KupmiosPluts({
-        kupoUrl: process.env.KUPO_URL ?? "" ,
-        ogmiosUrl: process.env.OGMIOS_URL ?? ""
+        kupoUrl: process.env.KUPO_URL,
+        ogmiosUrl: process.env.OGMIOS_URL
 
     });
 
