@@ -1,15 +1,18 @@
-import { Address, AddressStr, CanResolveToUTxO, CostModelPlutusV1Array, CostModelPlutusV2Array, CostModels, Data, ExBudget, GenesisInfos, Hash28, Hash32, ProtocolParameters, Script, Tx, TxOutRef, UTxO, Value, dataFromCbor, isITxOutRef, isIUTxO } from "@harmoniclabs/plu-ts";
+import { Address, AddressStr, CanResolveToUTxO, CostModelPlutusV1Array, CostModelPlutusV2Array, CostModels, Data, ExBudget, GenesisInfos, Hash28, Hash32, NormalizedGenesisInfos, ProtocolParameters, Script, Tx, TxOutRef, UTxO, Value, dataFromCbor, defaultProtocolParameters, isITxOutRef, isIUTxO } from "@harmoniclabs/plu-ts";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
+import { webcrypto } from "crypto";
+import { WebSocket } from "ws";
+import { rationalFromString } from "./utils/rationalFromString";
 
 export interface KupmiosPlutsConfig {
-    kupoUrl: string;
+    kupoUrl: string | undefined;
     ogmiosUrl?: string | undefined
     kupoApiKey?: string | undefined
 }
 
 export class KupmiosPluts
 {
-    kupoUrl: string;
+    kupoUrl: string | undefined;
     ogmiosUrl: string | undefined;
     kupoApiKey: string | undefined;
     readonly ogmiosWs!: WebSocket;
@@ -20,6 +23,13 @@ export class KupmiosPluts
         if( !this.isOgmiosWsReady ) return;
         
         this.ogmiosWs.close();
+    }
+
+    [Symbol.dispose]() { this.close(); }
+
+    hasKupo(): boolean
+    {
+        return typeof this.kupoUrl === "string";
     }
 
     constructor({
@@ -55,7 +65,11 @@ export class KupmiosPluts
             );
             Object.defineProperty(
                 this, "isOgmiosWsReady", {
-                    get: () => _isOgmiosReady,
+                    get: () => {
+                        if( _isOgmiosReady ) return true;
+                        _isOgmiosReady = _ogmiosWs?.readyState === WebSocket.OPEN;
+                        return _isOgmiosReady;
+                    },
                     set: () => {},
                     enumerable: true,
                     configurable: false
@@ -67,8 +81,8 @@ export class KupmiosPluts
     async submitTx( tx: Tx ): Promise<Hash32>
     {
         await this.ogmiosCall(
-            "Submit",
-            { submit: tx.toCbor().toString() }
+            "submitTransaction",
+            { transaction: { cbor: tx.toCbor().toString() } }
         );
 
         return tx.hash;
@@ -76,6 +90,7 @@ export class KupmiosPluts
 
     async waitTxConfirmation( txHash: string, timeout_ms: number = 60_000 ): Promise<boolean>
     {
+        if( !this.hasKupo() ) return false;
         timeout_ms = Math.abs( Number( timeout_ms ) );
         timeout_ms = Number.isSafeInteger( timeout_ms ) ? timeout_ms : 60_000;
 
@@ -171,75 +186,124 @@ export class KupmiosPluts
         return utxos[0];
     }
 
-    async getGenesisInfos(): Promise<GenesisInfos>
+    async getGenesisInfos( era: string = "conway" ): Promise<NormalizedGenesisInfos>
     {
-        const res = await this.ogmiosCall(
-            "Query",
-            { query: "genesisConfig" }
+        const result = {} as NormalizedGenesisInfos;
+
+        let res = await this.ogmiosCall(
+            "queryNetwork/startTime",
+            { era }
         );
 
-        return {
-            systemStartPOSIX: Date.parse( res.systemStart ),
-            slotLengthInMilliseconds: parseFloat( res.slotLength ) * 1000
-        };
+        (result as any).systemStartPosixMs = Date.parse( res ).valueOf();
+        (result as any).slotLengthMs = 1000;
+        (result as any).startSlotNo = 0;
+
+        return result;
     }
 
     async getProtocolParameters(): Promise<ProtocolParameters>
     {
         const res = await this.ogmiosCall(
-            "Query", 
-            { query: "currentProtocolParameters" }
+            "queryLedgerState/protocolParameters"
         );
 
         const costModels: CostModels = {};
-          Object.keys(res.costModels).forEach((v) => {
-            const version = v.split(":")[1].toUpperCase();
-            const plutusVersion = ("PlutusScript" + version) as ("PlutusScriptV1" | "PlutusScriptV2") ;
-            costModels[plutusVersion] = res.costModels[v] as (CostModelPlutusV2Array & CostModelPlutusV1Array);
-          });
 
-        const [memNum, memDenom] = res.prices.memory.split("/");
-        const [stepsNum, stepsDenom] = res.prices.steps.split("/");
+        if( res.plutusCostModels )
+        Object.keys(res.plutusCostModels).forEach((v) => {
+            const version = v.split(":")[1]?.toUpperCase();
+            if( typeof version !== "string" ) return;
+            const plutusVersion = ("PlutusScript" + version) as ("PlutusScriptV1" | "PlutusScriptV2" | "PlutusScriptV3" ) ;
+            costModels[plutusVersion] = res.plutusCostModels[v] as (CostModelPlutusV2Array & CostModelPlutusV1Array);
+        });
 
-        const [ poolInluenceNum, poolInfluenceDen ] = res.poolInfluence.split("/");
-        const [ monExpNum, monExpDen ] = res.monetaryExpansion.split("/");
-        const [ treasuryCutNum, treasuryCutDen ] = res.treasuryExpansion.split("/");
+        console.log( res );
 
         return {
-            txFeeFixed: BigInt( res.minFeeConstant ),
-            txFeePerByte: BigInt( res.minFeeCoefficient ),
-            maxTxSize: BigInt( res.maxTxSize ),
-            maxValueSize: BigInt( res.maxValueSize ),
-            collateralPercentage: BigInt( res.collateralPercentage ),
-            stakeAddressDeposit: BigInt( res.stakeKeyDeposit ),
-            stakePoolDeposit: BigInt( res.poolDeposit ),
-            executionUnitPrices: {
-                priceMemory: parseInt(memNum) / parseInt(memDenom),
-                priceSteps: parseInt(stepsNum) / parseInt(stepsDenom)
-            },
+            ...defaultProtocolParameters,
+            txFeeFixed: BigInt( res.minFeeConstant?.ada?.lovelace ?? defaultProtocolParameters.txFeeFixed ),
+            txFeePerByte: BigInt( res.minFeeCoefficient ?? defaultProtocolParameters.txFeePerByte ),
+            maxTxSize: BigInt( res.maxTxSize ?? defaultProtocolParameters.maxTxSize ),
+            maxValueSize: BigInt( res.maxValueSize?.bytes ?? defaultProtocolParameters.maxValueSize ),
+            collateralPercentage: BigInt( res.collateralPercentage ?? defaultProtocolParameters.collateralPercentage ),
+            stakeAddressDeposit: BigInt( res.stakeKeyDeposit ?? defaultProtocolParameters.stakeAddressDeposit ),
+            stakePoolDeposit: BigInt( res.poolDeposit ?? defaultProtocolParameters.stakePoolDeposit ),
+            executionUnitPrices:  res.scriptExecutionPrices ? {
+                priceMemory: rationalFromString( res.scriptExecutionPrices.memory ).toNumber(),
+                priceSteps: rationalFromString( res.scriptExecutionPrices.cpu ).toNumber()
+            } : defaultProtocolParameters.executionUnitPrices,
             costModels,
             maxBlockExecutionUnits: new ExBudget({
-                cpu: BigInt( res.maxExecutionUnitsPerBlock.steps ),
+                cpu: BigInt( res.maxExecutionUnitsPerBlock.cpu ),
                 mem: BigInt( res.maxExecutionUnitsPerBlock.memory ),
             }),
-            maxTxExecutionUnits: new ExBudget({
-                cpu: BigInt( res.maxExecutionUnitsPerTransaction.steps ),
+            maxTxExecutionUnits: res.maxExecutionUnitsPerTransaction? new ExBudget({
+                cpu: BigInt( res.maxExecutionUnitsPerTransaction.cpu ),
                 mem: BigInt( res.maxExecutionUnitsPerTransaction.memory )
-            }),
-            utxoCostPerByte: BigInt( res.coinsPerUtxoByte ),
-            maxCollateralInputs: BigInt( res.maxCollateralInputs ),
-            maxBlockBodySize: BigInt( res.maxBlockBodySize ),
-            maxBlockHeaderSize: BigInt( res.maxBlockHeaderSize ),
-            minPoolCost: BigInt( res.minPoolCost ),
-            monetaryExpansion: parseInt( monExpNum ) / parseInt( monExpDen ),
-            poolPledgeInfluence: parseInt( poolInluenceNum ) / parseInt( poolInfluenceDen ),
-            poolRetireMaxEpoch: BigInt( res.poolRetirementEpochBound ),
-            protocolVersion: {
-                major: res.protocolVersion.major,
-                minor: res.protocolVersion.minor
-            },
-            stakePoolTargetNum: BigInt( res.desiredNumberOfPools ),
-            treasuryCut: parseInt( treasuryCutNum ) / parseInt( treasuryCutDen ),
+            }) : defaultProtocolParameters.maxTxExecutionUnits,
+            utxoCostPerByte: BigInt( res.coinsPerUtxoByte ?? defaultProtocolParameters.utxoCostPerByte ),
+            maxCollateralInputs: BigInt( res.maxCollateralInputs ?? defaultProtocolParameters.maxCollateralInputs ),
+            maxBlockBodySize: BigInt( res.maxBlockBodySize?.bytes ?? defaultProtocolParameters.maxBlockBodySize ),
+            maxBlockHeaderSize: BigInt( res.maxBlockHeaderSize?.bytes ?? defaultProtocolParameters.maxBlockHeaderSize ),
+            minPoolCost: BigInt( res.minPoolCost ?? defaultProtocolParameters.minPoolCost ),
+            monetaryExpansion: rationalFromString( res.monetaryExpansion ?? defaultProtocolParameters.monetaryExpansion ),
+            poolPledgeInfluence: rationalFromString( res.stakePoolPledgeInfluence ?? defaultProtocolParameters.poolPledgeInfluence ),
+            poolRetireMaxEpoch: BigInt(
+                res.poolRetirementEpochBound ??
+                defaultProtocolParameters.poolRetireMaxEpoch ??
+                0
+            ),
+            protocolVersion: res.protocolVersion ? {
+                major: res.version.major,
+                minor: res.version.minor
+            } : defaultProtocolParameters.protocolVersion,
+            stakePoolTargetNum: BigInt(
+                res.desiredNumberOfPools ??
+                defaultProtocolParameters.stakePoolTargetNum ??
+                0
+            ),
+            treasuryCut: rationalFromString( res.treasuryExpansion ?? defaultProtocolParameters.treasuryCut ),
+            committeeTermLimit: BigInt(
+                res.constitutionalCommitteeMaxTermLength ??
+                defaultProtocolParameters.committeeTermLimit ??
+                0
+            ),
+            drepActivityPeriod: BigInt( res.delegateRepresentativeMaxIdleTime ?? defaultProtocolParameters.drepActivityPeriod ),
+            drepVotingThresholds: res.delegateRepresentativeVotingThresholds ? {
+                ...defaultProtocolParameters.drepVotingThresholds,
+                // committeeNoConfidence: ,
+                // committeeNormal: ,
+                // hardForkInitiation: ,
+                // motionNoConfidence: ,
+                // ppEconomicGroup: ,
+                // ppGovGroup: ,
+                // ppNetworkGroup: ,
+                // ppTechnicalGroup: ,
+                // treasuryWithdrawal: ,
+                // updateConstitution: ,
+            } : defaultProtocolParameters.drepVotingThresholds,
+            drepDeposit: BigInt(
+                res.delegateRepresentativeDeposit?.ada?.lovelace ??
+                defaultProtocolParameters.drepDeposit ??
+                0
+            ),
+            governanceActionDeposit: BigInt(
+                res.governanceActionDeposit?.ada?.lovelace ??
+                defaultProtocolParameters.governanceActionDeposit ??
+                0
+            ),
+            governanceActionValidityPeriod: BigInt(
+                res.governanceActionLifetime ??
+                defaultProtocolParameters.governanceActionValidityPeriod
+            ),
+            minCommitteSize: Number(
+                res.constitutionalCommitteeMinSize ??
+                defaultProtocolParameters.minCommitteSize ??
+                0
+            ),
+            minfeeRefScriptCostPerByte: defaultProtocolParameters.minfeeRefScriptCostPerByte ?? 0,
+            poolVotingThresholds: defaultProtocolParameters.poolVotingThresholds ?? 0
         };
     }
 
@@ -252,29 +316,39 @@ export class KupmiosPluts
         }
     }
     async ogmiosCall(
-        methodname: string,
-        args: any
+        method: string,
+        params?: object
     ): Promise<any>
     {
         await this.waitOgmiosReady();
+        const self = this;
+
+        const id = webcrypto.randomUUID();
 
         const promise: Promise<any> = new Promise((res, rej) => {
-            this.ogmiosWs.addEventListener("message", ( msg ) => {
+            function handler( msg: { data: any } )
+            {
                 try {
-                    res( JSON.parse( msg.data.toString() ).result  );
+                    const json = JSON.parse( msg.data.toString() );
+                    if( json.id !== id ) return;
+                    self.ogmiosWs.removeEventListener("message", handler);
+                    res( json.result  );
                 }
                 catch(e) {
+                    self.ogmiosWs.removeEventListener("message", handler);
                     rej( e );
                 }
-            }, { once: true })
+            }
+            this.ogmiosWs.addEventListener("message", handler);
         });
 
+        params = typeof params !== "object" || !params ? undefined : params;
+
         this.ogmiosWs.send(JSON.stringify({
-            type: "jsonwsp/request",
-            version: "1.0",
-            servicename: "ogmios",
-            methodname,
-            args,
+            jsonrpc: "2.0",
+            method,
+            params,
+            id
         }));
 
         return promise;
