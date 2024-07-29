@@ -5,7 +5,7 @@ import { WebSocket } from "ws";
 import { rationalFromString } from "./utils/rationalFromString";
 
 export interface KupmiosPlutsConfig {
-    kupoUrl: string | undefined;
+    kupoUrl?: string | undefined;
     ogmiosUrl?: string | undefined
     kupoApiKey?: string | undefined
 }
