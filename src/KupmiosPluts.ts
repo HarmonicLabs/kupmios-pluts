@@ -331,8 +331,11 @@ export class KupmiosPluts
                 try {
                     const json = JSON.parse( msg.data.toString() );
                     if( json.id !== id ) return;
+
                     self.ogmiosWs.removeEventListener("message", handler);
-                    res( json.result  );
+                    
+                    if( json.error ) rej( json.error );
+                    else res( json.result );
                 }
                 catch(e) {
                     self.ogmiosWs.removeEventListener("message", handler);
