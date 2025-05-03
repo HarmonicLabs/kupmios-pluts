@@ -1,4 +1,4 @@
-import { Address, AddressStr, CanResolveToUTxO, CostModelPlutusV1Array, CostModelPlutusV2Array, CostModels, Data, ExBudget, GenesisInfos, Hash28, Hash32, NormalizedGenesisInfos, ProtocolParameters, Script, Tx, TxOutRef, UTxO, Value, dataFromCbor, defaultProtocolParameters, isITxOutRef, isIUTxO } from "@harmoniclabs/buildooor";
+import { Address, AddressStr, CanResolveToUTxO, CostModelPlutusV1Array, CostModelPlutusV2Array, CostModelPlutusV3Array, CostModels, Data, ExBudget, GenesisInfos, Hash28, Hash32, NormalizedGenesisInfos, ProtocolParameters, Script, Tx, TxOutRef, UTxO, Value, dataFromCbor, defaultProtocolParameters, isITxOutRef, isIUTxO } from "@harmoniclabs/buildooor";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { webcrypto } from "crypto";
 import { WebSocket } from "ws";
@@ -215,7 +215,7 @@ export class KupmiosPluts
             const version = v.split(":")[1]?.toUpperCase();
             if( typeof version !== "string" ) return;
             const plutusVersion = ("PlutusScript" + version) as ("PlutusScriptV1" | "PlutusScriptV2" | "PlutusScriptV3" ) ;
-            costModels[plutusVersion] = res.plutusCostModels[v] as (CostModelPlutusV2Array & CostModelPlutusV1Array);
+            costModels[plutusVersion] = res.plutusCostModels[v] as (CostModelPlutusV2Array & CostModelPlutusV1Array & CostModelPlutusV3Array);
         });
 
         console.log( res );
@@ -410,6 +410,13 @@ export class KupmiosPluts
                 bytes
             );
         }
+        else if (language === "plutus:v3")
+            {
+                return new Script(
+                    "PlutusScriptV3",
+                    bytes
+                );
+            }
 
         throw new Error("unsupported script language: " + language);
     }
