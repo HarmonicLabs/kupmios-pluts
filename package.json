@@ -1,6 +1,6 @@
 {
     "name": "@harmoniclabs/kupmios-pluts",
-    "version": "0.0.1-dev2",
+    "version": "0.0.3-dev",
     "description": "",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
@@ -47,11 +47,11 @@
     },
     "homepage": "https://github.com/HarmonicLabs/plu-ts#readme",
     "dependencies": {
-        "@cardano-ogmios/client": "^6.5.0",
-        "@harmoniclabs/cbor": "^1.1.2",
+        "@cardano-ogmios/client": "^6.11.2",
+        "@harmoniclabs/cbor": "^1.6.6",
         "@harmoniclabs/obj-utils": "^1.0.0",
-        "@harmoniclabs/plu-ts": "^0.8.0-dev5",
-        "@harmoniclabs/uint8array-utils": "^1.0.0",
+        "@harmoniclabs/buildooor": "^0.1.9",
+        "@harmoniclabs/uint8array-utils": "^1.0.4",
         "@types/ws": "^8.5.12",
         "ws": "^8.18.0"
     },

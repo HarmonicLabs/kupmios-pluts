@@ -1,6 +1,6 @@
 import { config } from "dotenv"
 import { KupmiosPluts } from "../KupmiosPluts";
-import { isPartialProtocolParameters, isProtocolParameters } from "@harmoniclabs/plu-ts";
+import { isPartialProtocolParameters, isProtocolParameters } from "@harmoniclabs/buildooor";
 
 config();
 
