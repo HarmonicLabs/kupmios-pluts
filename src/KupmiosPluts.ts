@@ -32,11 +32,15 @@ export class KupmiosPluts
         return typeof this.kupoUrl === "string";
     }
 
-    constructor({
-        kupoUrl,
-        kupoApiKey,
-        ogmiosUrl
-    }: KupmiosPlutsConfig)
+    constructor(
+        
+        {
+            kupoUrl,
+            kupoApiKey,
+            ogmiosUrl
+        }: KupmiosPlutsConfig
+    
+    )
     {
         this.kupoUrl = kupoUrl;
         this.kupoApiKey = kupoApiKey;
