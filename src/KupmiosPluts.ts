@@ -1,8 +1,18 @@
-import { Address, AddressStr, CanResolveToUTxO, CostModelPlutusV1Array, CostModelPlutusV2Array, CostModelPlutusV3Array, CostModels, Data, ExBudget, GenesisInfos, Hash28, Hash32, NormalizedGenesisInfos, ProtocolParameters, Script, Tx, TxOutRef, UTxO, Value, dataFromCbor, defaultProtocolParameters, isITxOutRef, isIUTxO } from "@harmoniclabs/buildooor";
+import { Address, AddressStr, CanResolveToUTxO, CostModelPlutusV1Array, CostModelPlutusV2Array, CostModelPlutusV3Array, CostModels, Data, ExBudget, GenesisInfos, Hash28, Hash32, NormalizedGenesisInfos, ProtocolParameters, Script, Tx, TxOutRef, UTxO, Value, dataFromCbor, defaultProtocolParameters, isITxOutRef, isIUTxO, toCostModelV1, toCostModelV2, toCostModelV3 } from "@harmoniclabs/buildooor";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
-import { webcrypto } from "crypto";
-import { WebSocket } from "ws";
+import type { WebSocket as NodeWebSocket } from "ws";
 import { rationalFromString } from "./utils/rationalFromString";
+
+// use the native implementations in browsers; fall back to node packages server-side
+const WebSocketImpl = (
+    typeof globalThis.WebSocket !== "undefined"
+        ? globalThis.WebSocket
+        : require("ws").WebSocket
+) as typeof NodeWebSocket;
+const cryptoImpl: { randomUUID: () => string } =
+    typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.randomUUID === "function"
+        ? globalThis.crypto
+        : require("crypto").webcrypto;
 
 export interface KupmiosPlutsConfig {
     kupoUrl?: string | undefined;
@@ -15,7 +25,7 @@ export class KupmiosPluts
     kupoUrl: string | undefined;
     ogmiosUrl: string | undefined;
     kupoApiKey: string | undefined;
-    readonly ogmiosWs!: WebSocket;
+    readonly ogmiosWs!: NodeWebSocket;
     readonly isOgmiosWsReady: boolean
 
     close(): void
@@ -46,7 +56,7 @@ export class KupmiosPluts
         this.kupoApiKey = kupoApiKey;
         this.ogmiosUrl = ogmiosUrl;
         
-        let _ogmiosWs: WebSocket | undefined = undefined;
+        let _ogmiosWs: NodeWebSocket | undefined = undefined;
         let _isOgmiosReady = false;
 
         if( typeof this.ogmiosUrl === "string" )
@@ -54,11 +64,11 @@ export class KupmiosPluts
             Object.defineProperty(
                 this, "ogmiosWs", {
                     get: () => {
-                        if(!( _ogmiosWs instanceof WebSocket ))
+                        if(!( _ogmiosWs instanceof WebSocketImpl ))
                         {
-                            _ogmiosWs = new WebSocket( this.ogmiosUrl as string );
+                            _ogmiosWs = new WebSocketImpl( this.ogmiosUrl as string ) as NodeWebSocket;
                             _ogmiosWs.addEventListener("open", () => { _isOgmiosReady = true }, { once: true });
-                            _isOgmiosReady = _isOgmiosReady || _ogmiosWs.readyState === WebSocket.OPEN;
+                            _isOgmiosReady = _isOgmiosReady || _ogmiosWs.readyState === WebSocketImpl.OPEN;
                         }
                         return _ogmiosWs;
                     },
@@ -71,7 +81,7 @@ export class KupmiosPluts
                 this, "isOgmiosWsReady", {
                     get: () => {
                         if( _isOgmiosReady ) return true;
-                        _isOgmiosReady = _ogmiosWs?.readyState === WebSocket.OPEN;
+                        _isOgmiosReady = _ogmiosWs?.readyState === WebSocketImpl.OPEN;
                         return _isOgmiosReady;
                     },
                     set: () => {},
@@ -155,7 +165,7 @@ export class KupmiosPluts
             );
     }
 
-    async getUtxosAt( address: Address | AddressStr ): Promise<UTxO[]>
+    async getUtxosAt( address: Address | AddressStr | Hash28 ): Promise<UTxO[]>
     {
         address = address.toString() as AddressStr;
 
@@ -190,20 +200,25 @@ export class KupmiosPluts
         return utxos[0];
     }
 
-    async getGenesisInfos( era: string = "conway" ): Promise<NormalizedGenesisInfos>
+    async getGenesisInfos(): Promise<NormalizedGenesisInfos>
     {
-        const result = {} as NormalizedGenesisInfos;
+        // `queryNetwork/startTime` takes no params;
+        // era summaries are needed to anchor the slot <-> time conversion to the
+        // current era (mainnet had 20s slots during byron, so assuming
+        // slot 0 at system start with 1s slots would be off by ~3 years)
+        const [ startTimeISO, eraSummaries ] = await Promise.all([
+            this.ogmiosCall( "queryNetwork/startTime" ),
+            this.ogmiosCall( "queryLedgerState/eraSummaries" )
+        ]);
 
-        let res = await this.ogmiosCall(
-            "queryNetwork/startTime",
-            { era }
-        );
+        const systemStartMs = Date.parse( startTimeISO ).valueOf();
+        const currentEra = eraSummaries[ eraSummaries.length - 1 ];
 
-        (result as any).systemStartPosixMs = Date.parse( res ).valueOf();
-        (result as any).slotLengthMs = 1000;
-        (result as any).startSlotNo = 0;
-
-        return result;
+        return {
+            systemStartPosixMs: systemStartMs + currentEra.start.time.seconds * 1000,
+            startSlotNo: currentEra.start.slot,
+            slotLengthMs: currentEra.parameters.slotLength.milliseconds
+        } as NormalizedGenesisInfos;
     }
 
     async getProtocolParameters(): Promise<ProtocolParameters>
@@ -214,25 +229,36 @@ export class KupmiosPluts
 
         const costModels: CostModels = {};
 
+        // normalize the raw arrays the node reports to the named-key form:
+        // - pads to the full parameter count the plutus machine expects
+        //   (e.g. 297 entries for plutus v3 on protocol v10 vs 350 expected)
+        // - the named form survives object spreading; TxBuilder does
+        //   `new Machine({ ...costs })`, which corrupts plain arrays
+        const costModelNormalizers = {
+            PlutusScriptV1: toCostModelV1,
+            PlutusScriptV2: toCostModelV2,
+            PlutusScriptV3: toCostModelV3
+        } as const;
+
         if( res.plutusCostModels )
         Object.keys(res.plutusCostModels).forEach((v) => {
             const version = v.split(":")[1]?.toUpperCase();
             if( typeof version !== "string" ) return;
             const plutusVersion = ("PlutusScript" + version) as ("PlutusScriptV1" | "PlutusScriptV2" | "PlutusScriptV3" ) ;
-            costModels[plutusVersion] = res.plutusCostModels[v] as (CostModelPlutusV2Array & CostModelPlutusV1Array & CostModelPlutusV3Array);
+            const normalize = costModelNormalizers[plutusVersion];
+            const rawCosts = res.plutusCostModels[v];
+            costModels[plutusVersion] = ( normalize ? normalize( rawCosts ) : rawCosts ) as any;
         });
-
-        console.log( res );
 
         return {
             ...defaultProtocolParameters,
             txFeeFixed: BigInt( res.minFeeConstant?.ada?.lovelace ?? defaultProtocolParameters.txFeeFixed ),
             txFeePerByte: BigInt( res.minFeeCoefficient ?? defaultProtocolParameters.txFeePerByte ),
-            maxTxSize: BigInt( res.maxTxSize ?? defaultProtocolParameters.maxTxSize ),
+            maxTxSize: BigInt( res.maxTransactionSize?.bytes ?? defaultProtocolParameters.maxTxSize ),
             maxValueSize: BigInt( res.maxValueSize?.bytes ?? defaultProtocolParameters.maxValueSize ),
             collateralPercentage: BigInt( res.collateralPercentage ?? defaultProtocolParameters.collateralPercentage ),
-            stakeAddressDeposit: BigInt( res.stakeKeyDeposit ?? defaultProtocolParameters.stakeAddressDeposit ),
-            stakePoolDeposit: BigInt( res.poolDeposit ?? defaultProtocolParameters.stakePoolDeposit ),
+            stakeAddressDeposit: BigInt( res.stakeCredentialDeposit?.ada?.lovelace ?? defaultProtocolParameters.stakeAddressDeposit ),
+            stakePoolDeposit: BigInt( res.stakePoolDeposit?.ada?.lovelace ?? defaultProtocolParameters.stakePoolDeposit ),
             executionUnitPrices:  res.scriptExecutionPrices ? {
                 priceMemory: rationalFromString( res.scriptExecutionPrices.memory ).toNumber(),
                 priceSteps: rationalFromString( res.scriptExecutionPrices.cpu ).toNumber()
@@ -246,24 +272,24 @@ export class KupmiosPluts
                 cpu: BigInt( res.maxExecutionUnitsPerTransaction.cpu ),
                 mem: BigInt( res.maxExecutionUnitsPerTransaction.memory )
             }) : defaultProtocolParameters.maxTxExecutionUnits,
-            utxoCostPerByte: BigInt( res.coinsPerUtxoByte ?? defaultProtocolParameters.utxoCostPerByte ),
+            utxoCostPerByte: BigInt( res.minUtxoDepositCoefficient ?? defaultProtocolParameters.utxoCostPerByte ),
             maxCollateralInputs: BigInt( res.maxCollateralInputs ?? defaultProtocolParameters.maxCollateralInputs ),
             maxBlockBodySize: BigInt( res.maxBlockBodySize?.bytes ?? defaultProtocolParameters.maxBlockBodySize ),
             maxBlockHeaderSize: BigInt( res.maxBlockHeaderSize?.bytes ?? defaultProtocolParameters.maxBlockHeaderSize ),
-            minPoolCost: BigInt( res.minPoolCost ?? defaultProtocolParameters.minPoolCost ),
+            minPoolCost: BigInt( res.minStakePoolCost?.ada?.lovelace ?? defaultProtocolParameters.minPoolCost ),
             monetaryExpansion: rationalFromString( res.monetaryExpansion ?? defaultProtocolParameters.monetaryExpansion ),
             poolPledgeInfluence: rationalFromString( res.stakePoolPledgeInfluence ?? defaultProtocolParameters.poolPledgeInfluence ),
             poolRetireMaxEpoch: BigInt(
-                res.poolRetirementEpochBound ??
+                res.stakePoolRetirementEpochBound ??
                 defaultProtocolParameters.poolRetireMaxEpoch ??
                 0
             ),
-            protocolVersion: res.protocolVersion ? {
+            protocolVersion: res.version ? {
                 major: res.version.major,
                 minor: res.version.minor
             } : defaultProtocolParameters.protocolVersion,
             stakePoolTargetNum: BigInt(
-                res.desiredNumberOfPools ??
+                res.desiredNumberOfStakePools ??
                 defaultProtocolParameters.stakePoolTargetNum ??
                 0
             ),
@@ -327,7 +353,7 @@ export class KupmiosPluts
         await this.waitOgmiosReady();
         const self = this;
 
-        const id = webcrypto.randomUUID();
+        const id = cryptoImpl.randomUUID();
 
         const promise: Promise<any> = new Promise((res, rej) => {
             function handler( msg: { data: any } )
